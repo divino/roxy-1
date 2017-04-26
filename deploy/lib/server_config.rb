@@ -530,11 +530,9 @@ but --no-prompt parameter prevents prompting for password. Assuming 8.'
 
     setup = File.read ServerConfig.expand_path("#{@@path}/lib/xquery/setup.xqy")
     r = execute_query %Q{#{setup} setup:do-restart("#{group}")}
-    logger.info "code: #{r.code.to_i}"
 
     r.body = parse_body(r.body)
     logger.info r.body
-    logger.info "before return!!!!"
     return true
   end
 
@@ -551,7 +549,6 @@ but --no-prompt parameter prevents prompting for password. Assuming 8.'
         servers << item['nameref']
       end
     end
-    logger.debug "Servers #{servers}"
     return servers
   end
 
