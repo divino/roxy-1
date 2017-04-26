@@ -564,6 +564,7 @@ but --no-prompt parameter prevents prompting for password. Assuming 8.'
       if ! arg.match("^-")
         group = arg
         # pop the cluster parameter
+        # this fixes the issue where additional parameter is reprocessed in ml.rb
         ARGV.shift
       end
     end
