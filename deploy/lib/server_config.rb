@@ -533,7 +533,7 @@ but --no-prompt parameter prevents prompting for password. Assuming 8.'
     return r
   end
 
-  def restart_basic
+  def restart_basic(group)
     @ml_username = @properties['ml.bootstrap-user'] || @properties['ml.user']
     if @ml_username == @properties['ml.bootstrap-user']
       @ml_password = @properties['ml.bootstrap-password']
@@ -541,11 +541,43 @@ but --no-prompt parameter prevents prompting for password. Assuming 8.'
       @ml_password = @properties['ml.password']
     end
 
+    setup = File.read ServerConfig.expand_path("#{@@path}/lib/xquery/setup.xqy")
+    r = execute_query %Q{#{setup} setup:do-restart("#{group}")}
+
+    r.body = parse_body(r.body)
+    logger.info r.body
+    return true
+  end
+
+  def get_hosts
+    body = go(%Q{http://#{@properties["ml.server"]}:8002/manage/v2/hosts?format=json}, "get").body
+    parsed = JSON.parse body
+    items = parsed['host-default-list']['list-items']['list-item']
+    servers = []
+    logger.debug "Cluster host count #{items.count}"
+    if items.count > 1
+      items.each do |item|
+        servers << item['nameref']
+      end
+    else
+      # workaround for mac which doesn't include workstation name in the /etc/hosts file
+      servers << @properties['ml.server']
+    end
+    logger.debug "Cluster hosts #{servers}"
+    return servers
+  end
+
+  # implemented verified restart
+  def restart
+    # check if cluster or group restart
     group = nil
     ARGV.each do |arg|
       # Exclude any argument passed from command line.
       if ! arg.match("^-")
         group = arg
+        # pop the cluster parameter
+        # this fixes the issue where additional parameter is reprocessed in ml.rb
+        ARGV.shift
       end
     end
 
@@ -555,55 +587,64 @@ but --no-prompt parameter prevents prompting for password. Assuming 8.'
       logger.info "Restarting MarkLogic Server group #{group}"
     else
       # restarting partial cluster unsafe when working with multiple groups
-      #logger.info "Restarting MarkLogic Server group of #{@hostname}"
       logger.info "Restarting MarkLogic Server cluster of #{@hostname}"
       group = "cluster"
     end
-    logger.debug "this: #{self}"
-    setup = File.read ServerConfig.expand_path("#{@@path}/lib/xquery/setup.xqy")
-    r = execute_query %Q{#{setup} setup:do-restart("#{group}")}
-    logger.debug "code: #{r.code.to_i}"
 
-    r.body = parse_body(r.body)
-    logger.info r.body
-    return true
-  end
-
-  # implemented verified restart
-  def restart
     verify = find_arg(['--verify'])
     if verify==='false'
-      restart_basic
+      restart_basic group
     else
-      # defaults to verified restart
-      old_timestamp = go(%Q{http://#{@properties["ml.server"]}:8001/admin/v1/timestamp}, "get").body
-      restart_basic
-      retry_count = 0
       retry_max = @properties["ml.verify_retry_max"].to_i
       retry_interval = @properties["ml.verify_retry_interval"].to_i
-      new_timestamp = old_timestamp
-      while retry_count < retry_max do
-        begin
-          new_timestamp = go(%Q{http://#{@properties["ml.server"]}:8001/admin/v1/timestamp}, "get").body
-        rescue
-          logger.info 'Verifying restart ...'
-          logger.debug 'Retry attempt ' + retry_count.to_s + ' failed'
-        end
-        if new_timestamp != old_timestamp
-          # indicates that restart is confirmed successful
-          break
-        end
-        logger.debug "Verifying restart..."
-        sleep retry_interval
-        retry_count += 1
-      end
-      if new_timestamp == old_timestamp
-        logger.warn "Could not verify restart"
+
+      hosts = []
+      if group
+        hosts = get_hosts
       else
-        logger.info 'Verified restart.'
-        logger.debug "Verified restart new #{new_timestamp} old #{old_timestamp}"
+        hosts << @properties["ml.server"]
+      end
+
+      timestamps = Hash.new
+      hosts.each do |host|
+        timestamps[host] = Hash.new
+        logger.debug "Get host #{host} timestamp ... "
+        timestamps[host]['timestamp'] = go(%Q{http://#{host}:8001/admin/v1/timestamp}, "get").body
+        timestamps[host]['retry_count'] = 0
+      end
+
+      restart_basic group
+
+      errors = 0
+      while hosts.count > 0
+        hosts.each do |host|
+          if timestamps[host]['retry_count'] >= retry_max
+            logger.info "Could not verify restart of host #{host}"
+            hosts.delete host
+            errors += 1
+          else
+        begin
+        sleep retry_interval
+              logger.info "Verifying restart of host #{host} ... "
+              new_timestamp = go(%Q{http://#{host}:8001/admin/v1/timestamp}, "get").body
+              if new_timestamp != timestamps[host]['timestamp']
+                hosts.delete host
+                logger.info "Host #{host} successfully restarted timestamps old[#{timestamps[host]['timestamp']}] new[#{new_timestamp}]."
+      end
+            rescue
+              timestamps[host]['retry_count'] += 1
+              logger.info "Retry attempt #{timestamps[host]['retry_count']} on #{host} failed"
+            end
+          end
+        end
+      end
+      if errors === 0
+        logger.info "Verified all servers restarted."
+      else
+        return false
       end
     end
+    return true
   end
 
   def merge
